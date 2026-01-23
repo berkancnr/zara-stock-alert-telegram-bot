@@ -1,0 +1,18 @@
+# Python virtualenv
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite DB
+watches.db
+
+# OS
+.DS_Store
+
+# Playwright cache (opsiyonel)
+.playwright/
