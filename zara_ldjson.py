@@ -52,7 +52,7 @@ def fetch_document_html_headful(url: str, wait_ms: int = 6000) -> str:
     doc_html: Optional[str] = None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # Zara için kritik
+        browser = p.chromium.launch(headless=False)  # Zara için kritik
         context = browser.new_context(
             locale="tr-TR",
             timezone_id="Europe/Istanbul",
