@@ -22,8 +22,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHECK_INTERVAL_SECONDS = 60
 
 JOB_LOCK = asyncio.Lock()
-# Limit concurrency to 3
-SEM = asyncio.Semaphore(3)
+# Limit concurrency to 5 (increased from 3 due to resource blocking optimization)
+SEM = asyncio.Semaphore(5)
 
 
 def log(msg: str) -> None:

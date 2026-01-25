@@ -63,6 +63,15 @@ class ZaraBrowserManager:
         page = await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
+        # Gereksiz kaynakları engelle (Hızlandırma)
+        async def route_handler(route):
+            if route.request.resource_type in ["image", "media", "font", "stylesheet", "other"]:
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", route_handler)
+
         async def on_response(resp: Response):
             nonlocal doc_html
             try:
@@ -82,11 +91,16 @@ class ZaraBrowserManager:
         page.on("response", on_response)
 
         try:
+            # Sadece DOM içeriğinin yüklenmesini bekle (load state gereksiz zaman kaybı)
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            
+            # Verinin (ld+json) geldiğinden emin olmak için kısa bir bekleme (isteğe bağlı)
+            # Genelde domcontentloaded yeterlidir, ancak garanti olsun diye script tagini bekleyebiliriz.
             try:
-                await page.wait_for_load_state("load", timeout=30000)
+                await page.wait_for_selector('script[type="application/ld+json"]', state="attached", timeout=5000)
             except Exception:
-                pass
+                pass 
+
         finally:
             # We only close the context/page, keep the browser open
             await context.close()
