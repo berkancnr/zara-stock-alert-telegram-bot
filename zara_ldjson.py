@@ -155,6 +155,12 @@ async def check_size_status_async(url: str, target_size: str) -> Tuple[str, str,
     """
     html = await zara_browser.fetch_document_html(url)
     ld = extract_ldjson_from_html(html)
+    
+    # DEBUG: Gelen tüm LD+JSON verisini konsola bas
+    print(f"\n--- DEBUG: LD-JSON Data for {url} ---")
+    print(json.dumps(ld, indent=2, ensure_ascii=False))
+    print("--- DEBUG END ---\n")
+
     products = [o for o in ld if isinstance(o, dict) and o.get("@type") == "Product"]
 
     tsize = target_size.upper()
