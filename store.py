@@ -15,9 +15,16 @@ def init_db():
             created_at INTEGER NOT NULL,
             last_status TEXT,
             last_availability TEXT,
+            last_price TEXT,
             UNIQUE(chat_id, url, size)
         );
         """)
+        # Check if last_price column exists (migration for existing dbs)
+        try:
+            con.execute("SELECT last_price FROM watches LIMIT 1")
+        except sqlite3.OperationalError:
+            con.execute("ALTER TABLE watches ADD COLUMN last_price TEXT")
+        
         con.commit()
 
 @dataclass
@@ -29,6 +36,7 @@ class Watch:
     created_at: int
     last_status: Optional[str]
     last_availability: Optional[str]
+    last_price: Optional[str]
 
 def add_watch(chat_id: str, url: str, size: str, now_ts: int) -> bool:
     with sqlite3.connect(DB_PATH) as con:
@@ -54,7 +62,7 @@ def remove_watch(chat_id: str, url: str, size: str) -> bool:
 def list_watches(chat_id: str) -> List[Watch]:
     with sqlite3.connect(DB_PATH) as con:
         cur = con.execute(
-            "SELECT id, chat_id, url, size, created_at, last_status, last_availability FROM watches WHERE chat_id=? ORDER BY id DESC",
+            "SELECT id, chat_id, url, size, created_at, last_status, last_availability, last_price FROM watches WHERE chat_id=? ORDER BY id DESC",
             (chat_id,),
         )
         rows = cur.fetchall()
@@ -63,15 +71,21 @@ def list_watches(chat_id: str) -> List[Watch]:
 def list_all_watches() -> List[Watch]:
     with sqlite3.connect(DB_PATH) as con:
         cur = con.execute(
-            "SELECT id, chat_id, url, size, created_at, last_status, last_availability FROM watches ORDER BY id ASC"
+            "SELECT id, chat_id, url, size, created_at, last_status, last_availability, last_price FROM watches ORDER BY id ASC"
         )
         rows = cur.fetchall()
     return [Watch(*r) for r in rows]
 
-def update_watch_status(watch_id: int, last_status: str, last_availability: str):
+def update_watch_status(watch_id: int, last_status: str, last_availability: str, last_price: Optional[str] = None):
     with sqlite3.connect(DB_PATH) as con:
-        con.execute(
-            "UPDATE watches SET last_status=?, last_availability=? WHERE id=?",
-            (last_status, last_availability, watch_id),
-        )
+        if last_price is not None:
+            con.execute(
+                "UPDATE watches SET last_status=?, last_availability=?, last_price=? WHERE id=?",
+                (last_status, last_availability, last_price, watch_id),
+            )
+        else:
+            con.execute(
+                "UPDATE watches SET last_status=?, last_availability=? WHERE id=?",
+                (last_status, last_availability, watch_id),
+            )
         con.commit()

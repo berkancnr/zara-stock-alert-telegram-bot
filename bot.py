@@ -3,6 +3,7 @@ import os
 import datetime
 import asyncio
 from urllib.parse import urlparse
+from typing import Optional
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -36,8 +37,8 @@ def _valid_url(u: str) -> bool:
         return False
 
 
-def _format_alert(details: dict, status: str) -> str:
-    return (
+def _format_alert(details: dict, status: str, price_change_msg: Optional[str] = None) -> str:
+    base = (
         f"--- ZARA ALERT --- ({status})\n"
         f"{details.get('name')}\n"
         f"Size: {details.get('size')} | Color: {details.get('color')}\n"
@@ -46,6 +47,9 @@ def _format_alert(details: dict, status: str) -> str:
         f"SKU: {details.get('sku')}\n"
         f"URL: {details.get('url')}"
     )
+    if price_change_msg:
+        base += f"\n\n{price_change_msg}"
+    return base
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,7 +59,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/unwatch <BEDEN> <URL>\n"
         "/list\n"
         "/check (hemen kontrol)\n\n"
-        "Not: POSITIVE yakalanınca mesaj gönderilir ve ilgili watch otomatik silinir (one-shot).\n\n"
+        "Not: POSITIVE yakalanınca mesaj gönderilir ve ilgili watch otomatik silinir (one-shot).\n"
+        "Fiyat değişimi olursa da bildirim gönderilir (watch silinmez).\n\n"
         "Örn:\n"
         "/watch XL https://www.zara.com/tr/tr/....html\n"
     )
@@ -117,7 +122,8 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["İzlediklerin:"]
     for w in watches:
-        lines.append(f"- id={w.id} | {w.size} | {w.url} | last={w.last_status or '-'} ({w.last_availability or '-'})")
+        price_info = f" | {w.last_price}" if w.last_price else ""
+        lines.append(f"- id={w.id} | {w.size} | {w.url} | last={w.last_status or '-'} ({w.last_availability or '-'}{price_info})")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -127,6 +133,8 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     POSITIVE yakaladığı watch için:
       - Telegram alert gönderir
       - remove_watch(chat_id, url, size) ile watch kaydını DB'den siler (one-shot)
+    Fiyat değişimi için:
+      - Telegram alert gönderir (watch silinmez)
     """
     chat_id = str(update.effective_chat.id)
     watches = list_watches(chat_id)
@@ -147,21 +155,37 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status, av_norm, details = await asyncio.to_thread(check_size_status, w.url, w.size)
 
             log(f"Manual -> result id={w.id}: status={status}, availability={av_norm}")
+            
+            current_price = str(details.get("price")) if details.get("price") is not None else None
+            last_price = w.last_price
+            price_changed = False
+            price_msg = None
+
+            if last_price and current_price and last_price != current_price:
+                price_changed = True
+                price_msg = f"💰 FİYAT DEĞİŞTİ: {last_price} -> {current_price}"
+                log(f"Manual -> Price change detected id={w.id}: {price_msg}")
 
             if status == "POSITIVE":
                 log(f"Manual -> sending alert then removing watch id={w.id}")
                 await asyncio.to_thread(
-                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status)
+                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
                 )
                 removed = remove_watch(w.chat_id, w.url, w.size)
                 log(f"Manual -> removed={removed} (chat_id={w.chat_id}, size={w.size})")
                 continue
+            
+            if price_changed:
+                 log(f"Manual -> sending price alert id={w.id}")
+                 await asyncio.to_thread(
+                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
+                )
 
-            update_watch_status(w.id, status, av_norm)
+            update_watch_status(w.id, status, av_norm, last_price=current_price)
 
         except Exception as e:
             log(f"Manual ERROR id={w.id}: {repr(e)}")
-            update_watch_status(w.id, "ERROR", "error")
+            update_watch_status(w.id, "ERROR", "error", last_price=w.last_price)
 
     await update.message.reply_text("Kontrol tamamlandı.")
     log("Manual check finished")
@@ -173,6 +197,8 @@ async def periodic_job(context: ContextTypes.DEFAULT_TYPE):
     POSITIVE yakaladığı watch için:
       - Telegram alert gönderir
       - remove_watch(chat_id, url, size) ile watch kaydını DB'den siler (one-shot)
+    Fiyat değişimi için:
+      - Telegram alert gönderir (watch silinmez)
     """
     if JOB_LOCK.locked():
         log("⏱️ periodic_job skipped (previous run still in progress)")
@@ -195,20 +221,36 @@ async def periodic_job(context: ContextTypes.DEFAULT_TYPE):
 
                 log(f"Periodic -> result id={w.id}: status={status}, availability={av_norm}")
 
+                current_price = str(details.get("price")) if details.get("price") is not None else None
+                last_price = w.last_price
+                price_changed = False
+                price_msg = None
+
+                if last_price and current_price and last_price != current_price:
+                    price_changed = True
+                    price_msg = f"💰 FİYAT DEĞİŞTİ: {last_price} -> {current_price}"
+                    log(f"Periodic -> Price change detected id={w.id}: {price_msg}")
+
                 if status == "POSITIVE":
                     log(f"Periodic -> sending alert then removing watch id={w.id}")
                     await asyncio.to_thread(
-                        send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status)
+                        send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
                     )
                     removed = remove_watch(w.chat_id, w.url, w.size)
                     log(f"Periodic -> removed={removed} (chat_id={w.chat_id}, size={w.size})")
                     continue
+                
+                if price_changed:
+                     log(f"Periodic -> sending price alert id={w.id}")
+                     await asyncio.to_thread(
+                        send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
+                    )
 
-                update_watch_status(w.id, status, av_norm)
+                update_watch_status(w.id, status, av_norm, last_price=current_price)
 
             except Exception as e:
                 log(f"Periodic ERROR id={w.id}: {repr(e)}")
-                update_watch_status(w.id, "ERROR", "error")
+                update_watch_status(w.id, "ERROR", "error", last_price=w.last_price)
 
 
 def main():

@@ -85,7 +85,12 @@ def fetch_document_html_headful(url: str, wait_ms: int = 6000) -> str:
         page.on("response", on_response)
 
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(wait_ms)
+        
+        try:
+            # Sabit bekleme yerine sayfanın tamamen yüklenmesini bekle
+            page.wait_for_load_state("load", timeout=30000)
+        except Exception:
+            pass  # Timeout veya hata durumunda devam et
 
         context.close()
         browser.close()
