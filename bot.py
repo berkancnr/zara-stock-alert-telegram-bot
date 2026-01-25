@@ -16,12 +16,14 @@ from store import (
     list_all_watches,
     update_watch_status,
 )
-from zara_ldjson import check_size_status, send_telegram
+from zara_ldjson import check_size_status_async, send_telegram
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHECK_INTERVAL_SECONDS = 60
 
 JOB_LOCK = asyncio.Lock()
+# Limit concurrency to 3
+SEM = asyncio.Semaphore(3)
 
 
 def log(msg: str) -> None:
@@ -127,14 +129,52 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def process_watch(w, source: str):
+    async with SEM:
+        try:
+            log(f"{source} -> checking watch id={w.id} size={w.size}")
+
+            # check_size_status_async is now async, so await it directly
+            status, av_norm, details = await check_size_status_async(w.url, w.size)
+
+            log(f"{source} -> result id={w.id}: status={status}, availability={av_norm}")
+            
+            current_price = str(details.get("price")) if details.get("price") is not None else None
+            last_price = w.last_price
+            price_changed = False
+            price_msg = None
+
+            if last_price and current_price and last_price != current_price:
+                price_changed = True
+                price_msg = f"💰 FİYAT DEĞİŞTİ: {last_price} -> {current_price}"
+                log(f"{source} -> Price change detected id={w.id}: {price_msg}")
+
+            if status == "POSITIVE":
+                log(f"{source} -> sending alert then removing watch id={w.id}")
+                await asyncio.to_thread(
+                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
+                )
+                removed = remove_watch(w.chat_id, w.url, w.size)
+                log(f"{source} -> removed={removed} (chat_id={w.chat_id}, size={w.size})")
+                return
+            
+            if price_changed:
+                 log(f"{source} -> sending price alert id={w.id}")
+                 await asyncio.to_thread(
+                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
+                )
+
+            update_watch_status(w.id, status, av_norm, last_price=current_price)
+
+        except Exception as e:
+            log(f"{source} ERROR id={w.id}: {repr(e)}")
+            update_watch_status(w.id, "ERROR", "error", last_price=w.last_price)
+
+
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Kullanıcının kendi watch'larını hemen kontrol eder.
-    POSITIVE yakaladığı watch için:
-      - Telegram alert gönderir
-      - remove_watch(chat_id, url, size) ile watch kaydını DB'den siler (one-shot)
-    Fiyat değişimi için:
-      - Telegram alert gönderir (watch silinmez)
+    Concurrency limited by SEM.
     """
     chat_id = str(update.effective_chat.id)
     watches = list_watches(chat_id)
@@ -145,47 +185,12 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("İzleme listesi boş.")
         return
 
-    await update.message.reply_text("Kontrol ediyorum... (tarayıcı açılabilir)")
+    await update.message.reply_text("Kontrol ediyorum... (tarayıcı arka planda çalışır)")
     log("Manual check started")
 
-    for w in watches:
-        try:
-            log(f"Manual -> checking watch id={w.id} size={w.size}")
-
-            status, av_norm, details = await asyncio.to_thread(check_size_status, w.url, w.size)
-
-            log(f"Manual -> result id={w.id}: status={status}, availability={av_norm}")
-            
-            current_price = str(details.get("price")) if details.get("price") is not None else None
-            last_price = w.last_price
-            price_changed = False
-            price_msg = None
-
-            if last_price and current_price and last_price != current_price:
-                price_changed = True
-                price_msg = f"💰 FİYAT DEĞİŞTİ: {last_price} -> {current_price}"
-                log(f"Manual -> Price change detected id={w.id}: {price_msg}")
-
-            if status == "POSITIVE":
-                log(f"Manual -> sending alert then removing watch id={w.id}")
-                await asyncio.to_thread(
-                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
-                )
-                removed = remove_watch(w.chat_id, w.url, w.size)
-                log(f"Manual -> removed={removed} (chat_id={w.chat_id}, size={w.size})")
-                continue
-            
-            if price_changed:
-                 log(f"Manual -> sending price alert id={w.id}")
-                 await asyncio.to_thread(
-                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
-                )
-
-            update_watch_status(w.id, status, av_norm, last_price=current_price)
-
-        except Exception as e:
-            log(f"Manual ERROR id={w.id}: {repr(e)}")
-            update_watch_status(w.id, "ERROR", "error", last_price=w.last_price)
+    # Run tasks concurrently
+    tasks = [process_watch(w, "Manual") for w in watches]
+    await asyncio.gather(*tasks)
 
     await update.message.reply_text("Kontrol tamamlandı.")
     log("Manual check finished")
@@ -194,11 +199,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def periodic_job(context: ContextTypes.DEFAULT_TYPE):
     """
     Tüm watch'ları periyodik kontrol eder.
-    POSITIVE yakaladığı watch için:
-      - Telegram alert gönderir
-      - remove_watch(chat_id, url, size) ile watch kaydını DB'den siler (one-shot)
-    Fiyat değişimi için:
-      - Telegram alert gönderir (watch silinmez)
+    Concurrency limited by SEM.
     """
     if JOB_LOCK.locked():
         log("⏱️ periodic_job skipped (previous run still in progress)")
@@ -213,44 +214,9 @@ async def periodic_job(context: ContextTypes.DEFAULT_TYPE):
         if not watches:
             return
 
-        for w in watches:
-            try:
-                log(f"Periodic -> checking watch id={w.id} chat_id={w.chat_id} size={w.size}")
-
-                status, av_norm, details = await asyncio.to_thread(check_size_status, w.url, w.size)
-
-                log(f"Periodic -> result id={w.id}: status={status}, availability={av_norm}")
-
-                current_price = str(details.get("price")) if details.get("price") is not None else None
-                last_price = w.last_price
-                price_changed = False
-                price_msg = None
-
-                if last_price and current_price and last_price != current_price:
-                    price_changed = True
-                    price_msg = f"💰 FİYAT DEĞİŞTİ: {last_price} -> {current_price}"
-                    log(f"Periodic -> Price change detected id={w.id}: {price_msg}")
-
-                if status == "POSITIVE":
-                    log(f"Periodic -> sending alert then removing watch id={w.id}")
-                    await asyncio.to_thread(
-                        send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
-                    )
-                    removed = remove_watch(w.chat_id, w.url, w.size)
-                    log(f"Periodic -> removed={removed} (chat_id={w.chat_id}, size={w.size})")
-                    continue
-                
-                if price_changed:
-                     log(f"Periodic -> sending price alert id={w.id}")
-                     await asyncio.to_thread(
-                        send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
-                    )
-
-                update_watch_status(w.id, status, av_norm, last_price=current_price)
-
-            except Exception as e:
-                log(f"Periodic ERROR id={w.id}: {repr(e)}")
-                update_watch_status(w.id, "ERROR", "error", last_price=w.last_price)
+        # Run tasks concurrently
+        tasks = [process_watch(w, "Periodic") for w in watches]
+        await asyncio.gather(*tasks)
 
 
 def main():
