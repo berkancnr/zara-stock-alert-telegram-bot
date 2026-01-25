@@ -40,10 +40,17 @@ def _valid_url(u: str) -> bool:
 
 
 def _format_alert(details: dict, status: str, price_change_msg: Optional[str] = None) -> str:
+    found_sizes = details.get("found_sizes")
+    
+    if found_sizes:
+        size_info = f"⚡ FOUND SIZES: {', '.join(found_sizes)}"
+    else:
+        size_info = f"Size: {details.get('size')}"
+
     base = (
         f"--- ZARA ALERT --- ({status})\n"
         f"{details.get('name')}\n"
-        f"Size: {details.get('size')} | Color: {details.get('color')}\n"
+        f"{size_info} | Color: {details.get('color')}\n"
         f"Price: {details.get('price')} {details.get('currency')}\n"
         f"Availability: {details.get('availability_norm')}\n"
         f"SKU: {details.get('sku')}\n"
@@ -57,7 +64,8 @@ def _format_alert(details: dict, status: str, price_change_msg: Optional[str] = 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "Komutlar:\n"
-        "/watch <BEDEN> <URL>\n"
+        "/watch <BEDEN> <URL>  (Belirli bedeni izle)\n"
+        "/watch <URL>          (Herhangi bir bedeni izle - ANY)\n"
         "/unwatch <BEDEN> <URL>\n"
         "/list\n"
         "/check (hemen kontrol)\n\n"
@@ -65,18 +73,25 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Fiyat değişimi olursa da bildirim gönderilir (watch silinmez).\n\n"
         "Örn:\n"
         "/watch XL https://www.zara.com/tr/tr/....html\n"
+        "/watch https://www.zara.com/tr/tr/....html (Tüm bedenler)\n"
     )
     await update.message.reply_text(msg)
 
 
 async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Kullanım: /watch <BEDEN> <URL>")
+    if len(args) < 1:
+        await update.message.reply_text("Kullanım: /watch [BEDEN] <URL>")
         return
 
-    size = args[0].upper().strip()
-    url = args[1].strip()
+    # Eğer 1 argüman varsa sadece URL verilmiştir -> size="ANY"
+    if len(args) == 1:
+        size = "ANY"
+        url = args[0].strip()
+    else:
+        # 2 veya daha fazla varsa ilki size, ikincisi URL kabul edelim
+        size = args[0].upper().strip()
+        url = args[1].strip()
 
     log(f"/watch received | chat_id={update.effective_chat.id} | size={size} | url={url}")
 
@@ -95,8 +110,10 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
+    # unwatch için hala size ve url bekleyelim ki yanlışlıkla silinmesin
+    # ama kullanıcı /watch <URL> yaptıysa silmek için /unwatch ANY <URL> demeli
     if len(args) < 2:
-        await update.message.reply_text("Kullanım: /unwatch <BEDEN> <URL>")
+        await update.message.reply_text("Kullanım: /unwatch <BEDEN> <URL>\n(Tüm bedenler için: /unwatch ANY <URL>)")
         return
 
     size = args[0].upper().strip()

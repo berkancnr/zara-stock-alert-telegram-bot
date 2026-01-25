@@ -95,7 +95,6 @@ class ZaraBrowserManager:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             
             # Verinin (ld+json) geldiğinden emin olmak için kısa bir bekleme (isteğe bağlı)
-            # Genelde domcontentloaded yeterlidir, ancak garanti olsun diye script tagini bekleyebiliriz.
             try:
                 await page.wait_for_selector('script[type="application/ld+json"]', state="attached", timeout=5000)
             except Exception:
@@ -152,6 +151,7 @@ def _is_stock_positive(av_norm: str) -> bool:
 async def check_size_status_async(url: str, target_size: str) -> Tuple[str, str, Dict[str, Any]]:
     """
     Async version of check_size_status.
+    target_size "ANY" ise tüm bedenleri kontrol eder.
     """
     html = await zara_browser.fetch_document_html(url)
     ld = extract_ldjson_from_html(html)
@@ -162,8 +162,66 @@ async def check_size_status_async(url: str, target_size: str) -> Tuple[str, str,
     print("--- DEBUG END ---\n")
 
     products = [o for o in ld if isinstance(o, dict) and o.get("@type") == "Product"]
-
     tsize = target_size.upper()
+
+    # --- ANY (Herhangi bir beden) Modu ---
+    if tsize == "ANY":
+        found_sizes = []
+        base_product = None
+        
+        for p in products:
+            p_size = str(p.get("size", "")).strip()
+            if not p_size: continue
+            
+            # Ürün bilgilerini (ilk bulduğumuzdan) alalım
+            if base_product is None:
+                base_product = p
+            
+            offers = p.get("offers") or {}
+            if isinstance(offers, list):
+                offers = offers[0] if offers else {}
+                
+            av_raw = offers.get("availability")
+            av_norm = _norm_availability(av_raw)
+            
+            if _is_stock_positive(av_norm):
+                found_sizes.append(p_size)
+
+        if not base_product and products:
+            base_product = products[0]
+
+        # Eğer hiç ürün (varyant) bulamadıysak
+        if not base_product:
+             return "NOT_FOUND", "unknown", {"url": url, "size": "ANY"}
+
+        offers = base_product.get("offers") or {}
+        if isinstance(offers, list):
+            offers = offers[0] if offers else {}
+
+        if found_sizes:
+            status = "POSITIVE"
+            av_norm = "instock"
+        else:
+            status = "NEGATIVE"
+            av_norm = "outofstock"
+
+        details = {
+            "name": base_product.get("name"),
+            "brand": base_product.get("brand"),
+            "color": base_product.get("color"),
+            "size": "ANY",
+            "found_sizes": found_sizes,  # Bulunan stoklu bedenler
+            "sku": base_product.get("sku"),
+            "price": offers.get("price"),
+            "currency": offers.get("priceCurrency"),
+            "availability_raw": "multiple" if found_sizes else "none",
+            "availability_norm": av_norm,
+            "url": offers.get("url") or url,
+            "image": base_product.get("image"),
+        }
+        return status, av_norm, details
+
+    # --- Specific (Belirli Beden) Modu (Eski mantık) ---
     target = None
     for p in products:
         if str(p.get("size", "")).upper() == tsize:
