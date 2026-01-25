@@ -38,7 +38,7 @@ def _valid_url(u: str) -> bool:
 
 def _format_alert(details: dict, status: str) -> str:
     return (
-        f"ZARA ALERT ({status})\n"
+        f"--- ZARA ALERT --- ({status})\n"
         f"{details.get('name')}\n"
         f"Size: {details.get('size')} | Color: {details.get('color')}\n"
         f"Price: {details.get('price')} {details.get('currency')}\n"
