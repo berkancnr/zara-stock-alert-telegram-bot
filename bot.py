@@ -2,6 +2,7 @@ import time
 import os
 import datetime
 import asyncio
+import html
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -169,7 +170,7 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 İzleme listeniz şu an boş.")
         return
 
-    lines = ["📋 *İzleme Listeniz*"]
+    lines = ["📋 <b>İzleme Listeniz</b>"]
     
     for w in watches:
         # Determine status emoji
@@ -192,14 +193,14 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             product_display = "İsimsiz Ürün (Detay için bekleyiniz)"
 
-        # Escape special Markdown characters in name
-        product_display = product_display.replace("[", "").replace("]", "").replace("*", "")
+        # Escape special HTML characters in name
+        product_display = html.escape(product_display)
 
-        lines.append(f"{status_emoji} *{product_display}* ({w.size})")
+        lines.append(f"{status_emoji} <b>{product_display}</b> ({w.size})")
         lines.append(f"   💰 {price_str} | {status_text}")
-        lines.append(f"   🔗 [Ürüne Git]({w.url}) | 🗑️ `/unwatch {w.size} {w.url}`\n")
+        lines.append(f"   🔗 <a href='{w.url}'>Ürüne Git</a> | 🗑️ <code>/unwatch {w.size} {w.url}</code>\n")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def process_watch(w, source: str):
