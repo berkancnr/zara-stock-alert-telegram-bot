@@ -75,6 +75,15 @@ def remove_all_watches(chat_id: str) -> int:
         con.commit()
         return cur.rowcount
 
+def remove_watch_by_id(watch_id: int, chat_id: str) -> bool:
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.execute(
+            "DELETE FROM watches WHERE id=? AND chat_id=?",
+            (watch_id, chat_id),
+        )
+        con.commit()
+        return cur.rowcount > 0
+
 def list_watches(chat_id: str) -> List[Watch]:
     with sqlite3.connect(DB_PATH) as con:
         cur = con.execute(

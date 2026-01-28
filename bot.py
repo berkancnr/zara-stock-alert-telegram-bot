@@ -14,6 +14,7 @@ from store import (
     add_watch,
     remove_watch,
     remove_all_watches,
+    remove_watch_by_id,
     list_watches,
     list_all_watches,
     update_watch_status,
@@ -71,7 +72,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/unwatch <BEDEN> <URL>\n"
         "/list\n"
         "/check (hemen kontrol)\n"
-        "/clear (tüm listeyi sil)\n\n"
+        "/clear (tüm listeyi sil)\n"
+        "/del <ID> (ID ile listeden sil)\n\n"
         "Not: POSITIVE yakalanınca mesaj gönderilir ve ilgili watch otomatik silinir (one-shot).\n"
         "Fiyat değişimi olursa da bildirim gönderilir (watch silinmez).\n\n"
         "Örn:\n"
@@ -133,6 +135,23 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log(f"Watch not found | chat_id={update.effective_chat.id} | size={size}")
 
 
+async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a watch by its ID."""
+    if not context.args:
+        await update.message.reply_text("Kullanım: /del <ID>")
+        return
+    
+    try:
+        watch_id = int(context.args[0])
+        ok = remove_watch_by_id(watch_id, str(update.effective_chat.id))
+        if ok:
+            await update.message.reply_text(f"✅ ID:{watch_id} listeden silindi.")
+        else:
+            await update.message.reply_text("❌ Kayıt bulunamadı.")
+    except ValueError:
+        await update.message.reply_text("Geçersiz ID.")
+
+
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ask for confirmation before clearing all watches."""
     keyboard = [
@@ -170,37 +189,32 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 İzleme listeniz şu an boş.")
         return
 
-    lines = ["📋 <b>İzleme Listeniz</b>"]
-    
+    header = "📋 <b>İzleme Listeniz</b>\n\n"
+    messages = []
+    current_chunk = header
+
     for w in watches:
-        # Determine status emoji
-        if w.last_status == "POSITIVE":
-            status_emoji = "🟢"
-            status_text = "Stokta!"
-        elif w.last_status == "NEGATIVE":
-            status_emoji = "🔴"
-            status_text = "Tükendi"
-        else:
-            status_emoji = "⚪"
-            status_text = "Bekleniyor..."
+        status_emoji = "🟢" if w.last_status == "POSITIVE" else "🔴" if w.last_status == "NEGATIVE" else "⚪"
+        price_str = f"<b>{w.last_price}</b> TL" if w.last_price else "???"
+        product_display = html.escape(w.product_name or "İsimsiz Ürün")
 
-        # Format price
-        price_str = f"{w.last_price} TL" if w.last_price else "Fiyat Yok"
+        # Extremely compact format
+        entry = (
+            f"{status_emoji} <a href='{w.url}'>{product_display}</a>\n"
+            f"└ {w.size} | {price_str} | Sil: /del_{w.id}\n\n"
+        )
+
+        if len(current_chunk) + len(entry) > 4000:
+            messages.append(current_chunk)
+            current_chunk = ""
         
-        # Format Product Name (fallback to URL if empty)
-        if w.product_name:
-            product_display = w.product_name
-        else:
-            product_display = "İsimsiz Ürün (Detay için bekleyiniz)"
+        current_chunk += entry
 
-        # Escape special HTML characters in name
-        product_display = html.escape(product_display)
+    if current_chunk:
+        messages.append(current_chunk)
 
-        lines.append(f"{status_emoji} <b>{product_display}</b> ({w.size})")
-        lines.append(f"   💰 {price_str} | {status_text}")
-        lines.append(f"   🔗 <a href='{w.url}'>Ürüne Git</a> | 🗑️ <code>/unwatch {w.size} {w.url}</code>\n")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+    for msg in messages:
+        await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def process_watch(w, source: str):
@@ -301,6 +315,7 @@ async def post_init(application):
         BotCommand("list", "İzleme listeni göster"),
         BotCommand("check", "Hemen kontrol et"),
         BotCommand("clear", "Tüm listeyi temizle"),
+        BotCommand("del", "<ID> Listeden sil"),
         BotCommand("help", "Yardım mesajı"),
     ]
     await application.bot.set_my_commands(commands)
@@ -320,6 +335,7 @@ def main():
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("check", check_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
+    app.add_handler(CommandHandler("del", del_cmd))
     app.add_handler(CallbackQueryHandler(confirm_clear, pattern="^clear_"))
 
     app.job_queue.run_repeating(periodic_job, interval=CHECK_INTERVAL_SECONDS, first=10)
