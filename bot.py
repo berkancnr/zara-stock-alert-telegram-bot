@@ -5,13 +5,14 @@ import asyncio
 from urllib.parse import urlparse
 from typing import Optional
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
 from store import (
     init_db,
     add_watch,
     remove_watch,
+    remove_all_watches,
     list_watches,
     list_all_watches,
     update_watch_status,
@@ -68,7 +69,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch <URL>          (Herhangi bir bedeni izle - ANY)\n"
         "/unwatch <BEDEN> <URL>\n"
         "/list\n"
-        "/check (hemen kontrol)\n\n"
+        "/check (hemen kontrol)\n"
+        "/clear (tüm listeyi sil)\n\n"
         "Not: POSITIVE yakalanınca mesaj gönderilir ve ilgili watch otomatik silinir (one-shot).\n"
         "Fiyat değişimi olursa da bildirim gönderilir (watch silinmez).\n\n"
         "Örn:\n"
@@ -130,20 +132,74 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log(f"Watch not found | chat_id={update.effective_chat.id} | size={size}")
 
 
+async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ask for confirmation before clearing all watches."""
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Evet, Hepsini Sil", callback_data="clear_yes"),
+            InlineKeyboardButton("❌ İptal", callback_data="clear_no"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "⚠️ Tüm izleme listenizi silmek üzeresiniz. Emin misiniz?", reply_markup=reply_markup
+    )
+
+
+async def confirm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle callback queries from the clear confirmation buttons."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "clear_yes":
+        count = remove_all_watches(str(update.effective_chat.id))
+        await query.edit_message_text(f"🗑️ Listeniz temizlendi. ({count} kayıt silindi)")
+        log(f"/clear confirmed | chat_id={update.effective_chat.id} | removed_count={count}")
+    else:
+        await query.edit_message_text("❌ İşlem iptal edildi.")
+        log(f"/clear cancelled | chat_id={update.effective_chat.id}")
+
+
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     watches = list_watches(chat_id)
     log(f"/list received | chat_id={chat_id} | count={len(watches)}")
 
     if not watches:
-        await update.message.reply_text("İzleme listesi boş.")
+        await update.message.reply_text("📭 İzleme listeniz şu an boş.")
         return
 
-    lines = ["İzlediklerin:"]
+    lines = ["📋 *İzleme Listeniz*"]
+    
     for w in watches:
-        price_info = f" | {w.last_price}" if w.last_price else ""
-        lines.append(f"- id={w.id} | {w.size} | {w.url} | last={w.last_status or '-'} ({w.last_availability or '-'}{price_info})")
-    await update.message.reply_text("\n".join(lines))
+        # Determine status emoji
+        if w.last_status == "POSITIVE":
+            status_emoji = "🟢"
+            status_text = "Stokta!"
+        elif w.last_status == "NEGATIVE":
+            status_emoji = "🔴"
+            status_text = "Tükendi"
+        else:
+            status_emoji = "⚪"
+            status_text = "Bekleniyor..."
+
+        # Format price
+        price_str = f"{w.last_price} TL" if w.last_price else "Fiyat Yok"
+        
+        # Format Product Name (fallback to URL if empty)
+        if w.product_name:
+            product_display = w.product_name
+        else:
+            product_display = "İsimsiz Ürün (Detay için bekleyiniz)"
+
+        # Escape special Markdown characters in name
+        product_display = product_display.replace("[", "").replace("]", "").replace("*", "")
+
+        lines.append(f"{status_emoji} *{product_display}* ({w.size})")
+        lines.append(f"   💰 {price_str} | {status_text}")
+        lines.append(f"   🔗 [Ürüne Git]({w.url}) | 🗑️ `/unwatch {w.size} {w.url}`\n")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
 
 
 async def process_watch(w, source: str):
@@ -157,6 +213,7 @@ async def process_watch(w, source: str):
             log(f"{source} -> result id={w.id}: status={status}, availability={av_norm}")
             
             current_price = str(details.get("price")) if details.get("price") is not None else None
+            product_name = details.get("name")
             last_price = w.last_price
             price_changed = False
             price_msg = None
@@ -181,7 +238,7 @@ async def process_watch(w, source: str):
                     send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
                 )
 
-            update_watch_status(w.id, status, av_norm, last_price=current_price)
+            update_watch_status(w.id, status, av_norm, last_price=current_price, product_name=product_name)
 
         except Exception as e:
             log(f"{source} ERROR id={w.id}: {repr(e)}")
@@ -236,12 +293,24 @@ async def periodic_job(context: ContextTypes.DEFAULT_TYPE):
         await asyncio.gather(*tasks)
 
 
+async def post_init(application):
+    commands = [
+        BotCommand("watch", "[BEDEN] [URL] Takip başlat"),
+        BotCommand("unwatch", "[BEDEN] [URL] Takibi durdur"),
+        BotCommand("list", "İzleme listeni göster"),
+        BotCommand("check", "Hemen kontrol et"),
+        BotCommand("clear", "Tüm listeyi temizle"),
+        BotCommand("help", "Yardım mesajı"),
+    ]
+    await application.bot.set_my_commands(commands)
+    log("Bot commands menu set.")
+
 def main():
     init_db()
     log("Bot starting...")
     log(f"Check interval set to {CHECK_INTERVAL_SECONDS} seconds")
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", help_cmd))
@@ -249,6 +318,8 @@ def main():
     app.add_handler(CommandHandler("unwatch", unwatch_cmd))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("check", check_cmd))
+    app.add_handler(CommandHandler("clear", clear_cmd))
+    app.add_handler(CallbackQueryHandler(confirm_clear, pattern="^clear_"))
 
     app.job_queue.run_repeating(periodic_job, interval=CHECK_INTERVAL_SECONDS, first=10)
     log("Periodic job scheduled (first run in 10s)")
