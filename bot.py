@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from typing import Optional
 
 from telegram import Update, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
 from store import (
     init_db,
