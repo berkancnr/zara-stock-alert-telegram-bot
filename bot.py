@@ -3,6 +3,7 @@ import os
 import datetime
 import asyncio
 import html
+import re
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -136,20 +137,30 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete a watch by its ID."""
-    if not context.args:
-        await update.message.reply_text("Kullanım: /del <ID>")
+    """Delete a watch by its ID. Supports /del 5 and clicking /del_5."""
+    watch_id = None
+    if context.args:
+        try:
+            watch_id = int(context.args[0])
+        except ValueError:
+            pass
+    
+    # Check if it was a /del_ID style call (from clicking the link)
+    if not watch_id and update.message.text:
+        match = re.search(r"/del_(\d+)", update.message.text)
+        if match:
+            watch_id = int(match.group(1))
+
+    if not watch_id:
+        await update.message.reply_text("Kullanım: /del <ID> veya listedeki /del_ID linkine tıklayın.")
         return
     
-    try:
-        watch_id = int(context.args[0])
-        ok = remove_watch_by_id(watch_id, str(update.effective_chat.id))
-        if ok:
-            await update.message.reply_text(f"✅ ID:{watch_id} listeden silindi.")
-        else:
-            await update.message.reply_text("❌ Kayıt bulunamadı.")
-    except ValueError:
-        await update.message.reply_text("Geçersiz ID.")
+    ok = remove_watch_by_id(watch_id, str(update.effective_chat.id))
+    if ok:
+        await update.message.reply_text(f"✅ ID:{watch_id} listeden silindi.")
+        log(f"/del executed | chat_id={update.effective_chat.id} | watch_id={watch_id}")
+    else:
+        await update.message.reply_text("❌ Kayıt bulunamadı.")
 
 
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,6 +347,7 @@ def main():
     app.add_handler(CommandHandler("check", check_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("del", del_cmd))
+    app.add_handler(MessageHandler(filters.Regex(r"^/del_\d+$"), del_cmd))
     app.add_handler(CallbackQueryHandler(confirm_clear, pattern="^clear_"))
 
     app.job_queue.run_repeating(periodic_job, interval=CHECK_INTERVAL_SECONDS, first=10)
