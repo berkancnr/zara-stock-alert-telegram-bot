@@ -112,7 +112,8 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if added: res.append(f"✅ Takibe alındı: {', '.join(added)}")
     if existed: res.append(f"ℹ️ Zaten listede: {', '.join(existed)}")
     
-    await update.message.reply_text(f"{'\n'.join(res)}\n🔗 {url}")
+    reply_msg = "\n".join(res)
+    await update.message.reply_text(f"{reply_msg}\n🔗 {url}")
     log(f"Watch add | chat_id={update.effective_chat.id} | sizes={sizes}")
 
 
@@ -137,7 +138,8 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if removed: res.append(f"🗑️ Silindi: {', '.join(removed)}")
     if not_found: res.append(f"❌ Kayıt bulunamadı: {', '.join(not_found)}")
     
-    await update.message.reply_text(f"{'\n'.join(res)}\n🔗 {url}")
+    reply_msg = "\n".join(res)
+    await update.message.reply_text(f"{reply_msg}\n🔗 {url}")
 
 
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
