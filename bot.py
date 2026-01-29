@@ -20,13 +20,13 @@ from store import (
     list_all_watches,
     update_watch_status,
 )
-from zara_ldjson import check_size_status_async, send_telegram
+from zara_ldjson import get_zara_products_async, evaluate_size_status, send_telegram
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHECK_INTERVAL_SECONDS = 60
 
 JOB_LOCK = asyncio.Lock()
-# Limit concurrency to 5 (increased from 3 due to resource blocking optimization)
+# Limit concurrency to 5 unique URLs
 SEM = asyncio.Semaphore(5)
 
 
@@ -68,18 +68,16 @@ def _format_alert(details: dict, status: str, price_change_msg: Optional[str] = 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "Komutlar:\n"
-        "/watch <BEDEN> <URL>  (Belirli bedeni izle)\n"
-        "/watch <URL>          (Herhangi bir bedeni izle - ANY)\n"
-        "/unwatch <BEDEN> <URL>\n"
+        "/watch <BEDEN1,BEDEN2> <URL> (Çoklu beden)\n"
+        "/watch <URL>          (Herhangi bir beden - ANY)\n"
+        "/unwatch <BEDEN1,BEDEN2> <URL>\n"
         "/list\n"
         "/check (hemen kontrol)\n"
         "/clear (tüm listeyi sil)\n"
         "/del <ID> (ID ile listeden sil)\n\n"
-        "Not: POSITIVE yakalanınca mesaj gönderilir ve ilgili watch otomatik silinir (one-shot).\n"
-        "Fiyat değişimi olursa da bildirim gönderilir (watch silinmez).\n\n"
         "Örn:\n"
-        "/watch XL https://www.zara.com/tr/tr/....html\n"
-        "/watch https://www.zara.com/tr/tr/....html (Tüm bedenler)\n"
+        "/watch S,M,L https://www.zara.com/tr/tr/....html\n"
+        "/watch https://www.zara.com/tr/tr/....html\n"
     )
     await update.message.reply_text(msg)
 
@@ -87,53 +85,59 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("Kullanım: /watch [BEDEN] <URL>")
+        await update.message.reply_text("Kullanım: /watch [BEDEN1,BEDEN2] <URL>")
         return
 
-    # Eğer 1 argüman varsa sadece URL verilmiştir -> size="ANY"
     if len(args) == 1:
-        size = "ANY"
+        size_input = "ANY"
         url = args[0].strip()
     else:
-        # 2 veya daha fazla varsa ilki size, ikincisi URL kabul edelim
-        size = args[0].upper().strip()
+        size_input = args[0].upper().strip()
         url = args[1].strip()
-
-    log(f"/watch received | chat_id={update.effective_chat.id} | size={size} | url={url}")
 
     if not _valid_url(url):
         await update.message.reply_text("URL geçersiz görünüyor.")
         return
 
-    ok = add_watch(str(update.effective_chat.id), url, size, int(time.time()))
-    if ok:
-        await update.message.reply_text(f"Kaydedildi: {size} -> {url}")
-        log(f"Watch saved | chat_id={update.effective_chat.id} | size={size}")
-    else:
-        await update.message.reply_text("Zaten izleniyor.")
-        log(f"Watch already exists | chat_id={update.effective_chat.id} | size={size}")
+    sizes = [s.strip() for s in size_input.split(",") if s.strip()]
+    
+    added, existed = [], []
+    for s in sizes:
+        if add_watch(str(update.effective_chat.id), url, s, int(time.time())):
+            added.append(s)
+        else:
+            existed.append(s)
+    
+    res = []
+    if added: res.append(f"✅ Takibe alındı: {', '.join(added)}")
+    if existed: res.append(f"ℹ️ Zaten listede: {', '.join(existed)}")
+    
+    await update.message.reply_text(f"{'\n'.join(res)}\n🔗 {url}")
+    log(f"Watch add | chat_id={update.effective_chat.id} | sizes={sizes}")
 
 
 async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    # unwatch için hala size ve url bekleyelim ki yanlışlıkla silinmesin
-    # ama kullanıcı /watch <URL> yaptıysa silmek için /unwatch ANY <URL> demeli
     if len(args) < 2:
-        await update.message.reply_text("Kullanım: /unwatch <BEDEN> <URL>\n(Tüm bedenler için: /unwatch ANY <URL>)")
+        await update.message.reply_text("Kullanım: /unwatch <BEDEN1,BEDEN2> <URL>")
         return
 
-    size = args[0].upper().strip()
+    size_input = args[0].upper().strip()
     url = args[1].strip()
-
-    log(f"/unwatch received | chat_id={update.effective_chat.id} | size={size} | url={url}")
-
-    ok = remove_watch(str(update.effective_chat.id), url, size)
-    if ok:
-        await update.message.reply_text(f"Silindi: {size} -> {url}")
-        log(f"Watch removed | chat_id={update.effective_chat.id} | size={size}")
-    else:
-        await update.message.reply_text("Kayıt bulunamadı.")
-        log(f"Watch not found | chat_id={update.effective_chat.id} | size={size}")
+    sizes = [s.strip() for s in size_input.split(",") if s.strip()]
+    
+    removed, not_found = [], []
+    for s in sizes:
+        if remove_watch(str(update.effective_chat.id), url, s):
+            removed.append(s)
+        else:
+            not_found.append(s)
+    
+    res = []
+    if removed: res.append(f"🗑️ Silindi: {', '.join(removed)}")
+    if not_found: res.append(f"❌ Kayıt bulunamadı: {', '.join(not_found)}")
+    
+    await update.message.reply_text(f"{'\n'.join(res)}\n🔗 {url}")
 
 
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,94 +232,65 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
 
 
-async def process_watch(w, source: str):
+async def process_url_group(url: str, watches: list, source: str):
+    """Aynı URL'ye sahip tüm watch'ları tek bir sayfa yüklemesiyle işler."""
     async with SEM:
         try:
-            log(f"{source} -> checking watch id={w.id} size={w.size}")
-
-            # check_size_status_async is now async, so await it directly
-            status, av_norm, details = await check_size_status_async(w.url, w.size)
-
-            log(f"{source} -> result id={w.id}: status={status}, availability={av_norm}")
+            log(f"{source} -> processing group for {url} ({len(watches)} sizes)")
+            products = await get_zara_products_async(url)
             
-            current_price = str(details.get("price")) if details.get("price") is not None else None
-            product_name = details.get("name")
-            last_price = w.last_price
-            price_changed = False
-            price_msg = None
+            for w in watches:
+                status, av_norm, details = evaluate_size_status(products, w.size, url)
+                
+                current_price = str(details.get("price")) if details.get("price") is not None else None
+                product_name = details.get("name")
+                price_changed = w.last_price and current_price and w.last_price != current_price
+                price_msg = f"💰 FİYAT DEĞİŞTİ: {w.last_price} -> {current_price}" if price_changed else None
 
-            if last_price and current_price and last_price != current_price:
-                price_changed = True
-                price_msg = f"💰 FİYAT DEĞİŞTİ: {last_price} -> {current_price}"
-                log(f"{source} -> Price change detected id={w.id}: {price_msg}")
-
-            if status == "POSITIVE":
-                log(f"{source} -> sending alert then removing watch id={w.id}")
-                await asyncio.to_thread(
-                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
-                )
-                removed = remove_watch(w.chat_id, w.url, w.size)
-                log(f"{source} -> removed={removed} (chat_id={w.chat_id}, size={w.size})")
-                return
-            
-            if price_changed:
-                 log(f"{source} -> sending price alert id={w.id}")
-                 await asyncio.to_thread(
-                    send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg)
-                )
-
-            update_watch_status(w.id, status, av_norm, last_price=current_price, product_name=product_name)
+                if status == "POSITIVE":
+                    await asyncio.to_thread(send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg))
+                    remove_watch(w.chat_id, w.url, w.size)
+                    log(f"{source} -> ALERT SENT and removed id={w.id}")
+                else:
+                    if price_changed:
+                        await asyncio.to_thread(send_telegram, BOT_TOKEN, w.chat_id, _format_alert(details, status, price_msg))
+                    update_watch_status(w.id, status, av_norm, last_price=current_price, product_name=product_name)
 
         except Exception as e:
-            log(f"{source} ERROR id={w.id}: {repr(e)}")
-            update_watch_status(w.id, "ERROR", "error", last_price=w.last_price)
+            log(f"{source} ERROR for {url}: {repr(e)}")
 
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Kullanıcının kendi watch'larını hemen kontrol eder.
-    Concurrency limited by SEM.
-    """
     chat_id = str(update.effective_chat.id)
     watches = list_watches(chat_id)
-
-    log(f"/check received | chat_id={chat_id} | watch_count={len(watches)}")
 
     if not watches:
         await update.message.reply_text("İzleme listesi boş.")
         return
 
-    await update.message.reply_text("Kontrol ediyorum... (tarayıcı arka planda çalışır)")
-    log("Manual check started")
-
-    # Run tasks concurrently
-    tasks = [process_watch(w, "Manual") for w in watches]
+    await update.message.reply_text("Kontrol ediliyor... (URL gruplama devrede)")
+    
+    url_groups = {}
+    for w in watches:
+        url_groups.setdefault(w.url, []).append(w)
+    
+    tasks = [process_url_group(url, group, "Manual") for url, group in url_groups.items()]
     await asyncio.gather(*tasks)
-
     await update.message.reply_text("Kontrol tamamlandı.")
-    log("Manual check finished")
 
 
 async def periodic_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Tüm watch'ları periyodik kontrol eder.
-    Concurrency limited by SEM.
-    """
-    if JOB_LOCK.locked():
-        log("⏱️ periodic_job skipped (previous run still in progress)")
-        return
-
+    if JOB_LOCK.locked(): return
     async with JOB_LOCK:
-        log("⏱️ periodic_job tick")
-
         watches = list_all_watches()
-        log(f"Periodic -> found {len(watches)} watch(es)")
+        if not watches: return
 
-        if not watches:
-            return
-
-        # Run tasks concurrently
-        tasks = [process_watch(w, "Periodic") for w in watches]
+        url_groups = {}
+        for w in watches:
+            url_groups.setdefault(w.url, []).append(w)
+        
+        log(f"Periodic -> processing {len(url_groups)} unique URLs")
+        tasks = [process_url_group(url, group, "Periodic") for url, group in url_groups.items()]
         await asyncio.gather(*tasks)
 
 

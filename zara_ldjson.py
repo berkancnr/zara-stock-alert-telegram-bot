@@ -7,7 +7,7 @@ import requests
 from playwright.async_api import async_playwright, Response, Browser, Playwright
 
 LDJSON_RE = re.compile(
-    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    r"""<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>""",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -29,7 +29,6 @@ class ZaraBrowserManager:
         async with self._lock:
             if self.browser is None:
                 self.playwright = await async_playwright().start()
-                # Headless=False is critical for Zara
                 self.browser = await self.playwright.chromium.launch(headless=False)
 
     async def close(self):
@@ -41,14 +40,12 @@ class ZaraBrowserManager:
                 await self.playwright.stop()
                 self.playwright = None
 
-    async def fetch_document_html(self, url: str, wait_ms: int = 6000) -> str:
+    async def fetch_document_html(self, url: str) -> str:
         await self.ensure_browser()
         if not self.browser:
             raise RuntimeError("Browser could not be started")
 
         doc_html: Optional[str] = None
-        
-        # Create a new context for isolation (cookies, storage) per request
         context = await self.browser.new_context(
             locale="tr-TR",
             timezone_id="Europe/Istanbul",
@@ -63,7 +60,6 @@ class ZaraBrowserManager:
         page = await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
-        # Gereksiz kaynakları engelle (Hızlandırma)
         async def route_handler(route):
             if route.request.resource_type in ["image", "media", "font", "stylesheet", "other"]:
                 await route.abort()
@@ -75,192 +71,96 @@ class ZaraBrowserManager:
         async def on_response(resp: Response):
             nonlocal doc_html
             try:
-                if doc_html is not None:
-                    return
-                if resp.request.resource_type != "document":
-                    return
-                if resp.status != 200:
-                    return
-                ct = (resp.headers.get("content-type") or "").lower()
-                if "text/html" not in ct:
-                    return
+                if doc_html is not None: return
+                if resp.request.resource_type != "document": return
+                if resp.status != 200: return
+                if "text/html" not in (resp.headers.get("content-type") or "").lower(): return
                 doc_html = await resp.text()
-            except Exception:
-                return
+            except Exception: pass
 
         page.on("response", on_response)
 
         try:
-            # Sadece DOM içeriğinin yüklenmesini bekle (load state gereksiz zaman kaybı)
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            
-            # Verinin (ld+json) geldiğinden emin olmak için kısa bir bekleme (isteğe bağlı)
             try:
                 await page.wait_for_selector('script[type="application/ld+json"]', state="attached", timeout=5000)
-            except Exception:
-                pass 
-
+            except Exception: pass 
         finally:
-            # We only close the context/page, keep the browser open
             await context.close()
 
         if not doc_html:
-            raise RuntimeError("Document HTML yakalanamadı (deny/redirect olabilir).")
+            raise RuntimeError("Document HTML yakalanamadı.")
         return doc_html
 
-# Singleton instance
 zara_browser = ZaraBrowserManager.get_instance()
 
 def safe_json_loads(s: str) -> Optional[Any]:
     s = (s or "").strip()
-    if not s:
-        return None
-    try:
-        return json.loads(s)
-    except Exception:
-        return None
+    if not s: return None
+    try: return json.loads(s)
+    except Exception: return None
 
 def extract_ldjson_from_html(html: str) -> List[Any]:
     out: List[Any] = []
     for m in LDJSON_RE.finditer(html):
         raw = (m.group(1) or "").strip()
         parsed = safe_json_loads(raw)
-        if parsed is None:
-            continue
-        if isinstance(parsed, list):
-            out.extend(parsed)
-        else:
-            out.append(parsed)
+        if parsed is None: continue
+        if isinstance(parsed, list): out.extend(parsed)
+        else: out.append(parsed)
     return out
 
 def _norm_availability(av: Optional[str]) -> str:
-    if not av or not isinstance(av, str):
-        return "unknown"
-    av = av.strip()
-    av = av.rsplit("/", 1)[-1]
-    av = re.sub(r"[^a-zA-Z]", "", av).lower()
-    return av or "unknown"
+    if not av or not isinstance(av, str): return "unknown"
+    return re.sub(r"[^a-zA-Z]", "", av.rsplit("/", 1)[-1]).lower() or "unknown"
 
 def _is_stock_positive(av_norm: str) -> bool:
-    if av_norm in {"outofstock", "soldout", "discontinued"}:
-        return False
-    if av_norm == "unknown":
-        return False
-    return True
+    return av_norm not in {"outofstock", "soldout", "discontinued", "unknown"}
 
-async def check_size_status_async(url: str, target_size: str) -> Tuple[str, str, Dict[str, Any]]:
-    """
-    Async version of check_size_status.
-    target_size "ANY" ise tüm bedenleri kontrol eder.
-    """
+async def get_zara_products_async(url: str) -> List[Dict[str, Any]]:
+    """Fetch and return all product variants from LD+JSON."""
     html = await zara_browser.fetch_document_html(url)
     ld = extract_ldjson_from_html(html)
-    
-    # DEBUG: Gelen tüm LD+JSON verisini konsola bas
-    print(f"\n--- DEBUG: LD-JSON Data for {url} ---")
-    print(json.dumps(ld, indent=2, ensure_ascii=False))
-    print("--- DEBUG END ---\n")
+    return [o for o in ld if isinstance(o, dict) and o.get("@type") == "Product"]
 
-    products = [o for o in ld if isinstance(o, dict) and o.get("@type") == "Product"]
+def evaluate_size_status(products: List[Dict[str, Any]], target_size: str, url: str) -> Tuple[str, str, Dict[str, Any]]:
+    """Evaluate status for a specific size based on provided products list."""
     tsize = target_size.upper()
 
-    # --- ANY (Herhangi bir beden) Modu ---
     if tsize == "ANY":
         found_sizes = []
         base_product = None
-        
         for p in products:
             p_size = str(p.get("size", "")).strip()
             if not p_size: continue
-            
-            # Ürün bilgilerini (ilk bulduğumuzdan) alalım
-            if base_product is None:
-                base_product = p
-            
-            offers = p.get("offers") or {}
-            if isinstance(offers, list):
-                offers = offers[0] if offers else {}
-                
-            av_raw = offers.get("availability")
-            av_norm = _norm_availability(av_raw)
-            
-            if _is_stock_positive(av_norm):
-                found_sizes.append(p_size)
-
-        if not base_product and products:
-            base_product = products[0]
-
-        # Eğer hiç ürün (varyant) bulamadıysak
-        if not base_product:
-             return "NOT_FOUND", "unknown", {"url": url, "size": "ANY"}
-
-        offers = base_product.get("offers") or {}
-        if isinstance(offers, list):
-            offers = offers[0] if offers else {}
-
-        if found_sizes:
-            status = "POSITIVE"
-            av_norm = "instock"
-        else:
-            status = "NEGATIVE"
-            av_norm = "outofstock"
-
-        details = {
-            "name": base_product.get("name"),
-            "brand": base_product.get("brand"),
-            "color": base_product.get("color"),
-            "size": "ANY",
-            "found_sizes": found_sizes,  # Bulunan stoklu bedenler
-            "sku": base_product.get("sku"),
-            "price": offers.get("price"),
-            "currency": offers.get("priceCurrency"),
-            "availability_raw": "multiple" if found_sizes else "none",
-            "availability_norm": av_norm,
-            "url": offers.get("url") or url,
-            "image": base_product.get("image"),
+            if base_product is None: base_product = p
+            offers = p.get("offers", [{}])[0] if isinstance(p.get("offers"), list) else p.get("offers", {})
+            av_norm = _norm_availability(offers.get("availability"))
+            if _is_stock_positive(av_norm): found_sizes.append(p_size)
+        
+        if not base_product: return "NOT_FOUND", "unknown", {"url": url, "size": "ANY"}
+        offers = base_product.get("offers", [{}])[0] if isinstance(base_product.get("offers"), list) else base_product.get("offers", {})
+        av_norm = "instock" if found_sizes else "outofstock"
+        return ("POSITIVE" if found_sizes else "NEGATIVE"), av_norm, {
+            "name": base_product.get("name"), "color": base_product.get("color"),
+            "size": "ANY", "found_sizes": found_sizes, "sku": base_product.get("sku"),
+            "price": offers.get("price"), "currency": offers.get("priceCurrency"),
+            "availability_norm": av_norm, "url": url
         }
-        return status, av_norm, details
 
-    # --- Specific (Belirli Beden) Modu (Eski mantık) ---
-    target = None
-    for p in products:
-        if str(p.get("size", "")).upper() == tsize:
-            target = p
-            break
+    target = next((p for p in products if str(p.get("size", "")).upper() == tsize), None)
+    if not target: return "NOT_FOUND", "unknown", {"url": url, "size": tsize}
 
-    if not target:
-        return "NOT_FOUND", "unknown", {"url": url, "size": tsize}
-
-    offers = target.get("offers") or {}
-    if isinstance(offers, list):
-        offers = offers[0] if offers else {}
-
-    av_raw = offers.get("availability")
-    av_norm = _norm_availability(av_raw)
-
-    if av_norm == "unknown":
-        status = "UNKNOWN"
-    elif _is_stock_positive(av_norm):
-        status = "POSITIVE"
-    else:
-        status = "NEGATIVE"
-
-    details = {
-        "name": target.get("name"),
-        "brand": target.get("brand"),
-        "color": target.get("color"),
-        "size": tsize,
-        "sku": target.get("sku"),
-        "price": offers.get("price"),
-        "currency": offers.get("priceCurrency"),
-        "availability_raw": av_raw,
-        "availability_norm": av_norm,
-        "url": offers.get("url") or url,
-        "image": target.get("image"),
+    offers = target.get("offers", [{}])[0] if isinstance(target.get("offers"), list) else target.get("offers", {})
+    av_norm = _norm_availability(offers.get("availability"))
+    status = "POSITIVE" if _is_stock_positive(av_norm) else "NEGATIVE"
+    return status, av_norm, {
+        "name": target.get("name"), "color": target.get("color"), "size": tsize,
+        "sku": target.get("sku"), "price": offers.get("price"),
+        "currency": offers.get("priceCurrency"), "availability_norm": av_norm, "url": url
     }
-    return status, av_norm, details
+
 
 def send_telegram(token: str, chat_id: str, text: str) -> None:
     api = f"https://api.telegram.org/bot{token}/sendMessage"
-    r = requests.post(api, json={"chat_id": chat_id, "text": text}, timeout=20)
-    r.raise_for_status()
+    requests.post(api, json={"chat_id": chat_id, "text": text}, timeout=20).raise_for_status()
